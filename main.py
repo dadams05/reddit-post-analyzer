@@ -1,13 +1,12 @@
-# pylint: disable=missing-module-docstring,line-too-long
 import os
 import re
 import json
-from datetime import datetime
 import praw
-import requests
 import torch
-from dotenv import load_dotenv
+import requests
 from ollama import chat
+from datetime import datetime
+from dotenv import load_dotenv
 from transformers import pipeline
 
 
@@ -20,7 +19,7 @@ USER_AGENT = os.getenv("USER_AGENT")
 # globals
 REDDIT_LINK = "https://www.reddit.com/r/wallstreetbets/comments/1rpg0mb/welp_back_to_square_one/"  # reddit post to analyze
 OUT_DIRECTORY = "out"  # directory to output files
-FILE_NAME = f"analysis_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}"  # name of file to save to
+FILE_NAME = f"analysis_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"  # name of file to save to
 NUM_COMMENTS_REPLACE = None  # depth of comment subtrees to replace; can be None
 SUBREDDITS = [  # subreddits to scrape from
     "wallstreetbets",
@@ -41,7 +40,7 @@ BLACKLIST = [  # comments containing these words/phrases will be filtered out
     "[**Join WSB Discord**]",
 ]
 POST_ID_REGEX = r"/comments/([a-z0-9]+)"
-VISION_MODEL = "qwen3-vl:4b"
+VISION_MODEL = "moondream"
 ANALYZER_MODEL = "llama3:8b"
 DEVICE = 0 if torch.cuda.is_available() else -1 # set script to use gpu or cpu based on configuration
 MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
@@ -58,6 +57,7 @@ SENTIMENT_ANALYZER = pipeline(
 def download_image(image_url, filename):
     """Simple function to download an image given a URL and the filename to save it to"""
     try:
+        image_url = image_url.replace("amp;", "") # clean praw gallery url amps
         response = requests.get(image_url, timeout=60) # 1 minute timeout
         response.raise_for_status()
         with open(filename, "wb") as image_file:
@@ -86,7 +86,7 @@ if __name__ == "__main__":
     data = {}
     data["title"] = submission.title
     data["created"] = str(datetime.fromtimestamp(submission.created_utc))
-    data["selftext"] = submission.selftext
+    data["selftext"] = submission.selftext if submission.selftext else ""
     data["id"] = submission.id
     data["score"] = submission.score
     data["url"] = submission.url
@@ -146,7 +146,7 @@ if __name__ == "__main__":
 
     # inject the analyzed images back into or onto the end
     print(">> Injecting image analysis back into post text")
-    text = submission.selftext
+    text = data["selftext"] # keeps assignment dynamic and matching the safe layout above
     for i in images:
         if i["url"] in text:
             text = text.replace(i["url"], i["analysis"])
@@ -177,20 +177,27 @@ if __name__ == "__main__":
             comment_count += 1
     data["filtered_num_comments"] = comment_count
 
-    # analyze the filtered comments
+    # analyze the comments
     print(">> Analyzing comment sentiment")
     pos_count = 0
     neg_count = 0
     neu_count = 0
-    for comment in data["comments"]:
-        analysis = SENTIMENT_ANALYZER(comment["body"])
-        comment["sentiment"] = analysis[0]
-        if analysis[0]["label"] == "positive":
-            pos_count += 1
-        elif analysis[0]["label"] == "negative":
-            neg_count += 1
-        elif analysis[0]["label"] == "neutral":
-            neu_count += 1
+    
+    if data["comments"]:
+        # extract comment text blocks for batch processing
+        comment_bodies = [comment["body"] for comment in data["comments"]]
+        # run pipeline over the full list (uses optimal batching under the hood)
+        batch_results = SENTIMENT_ANALYZER(comment_bodies, batch_size=16)
+        # re-map results back to your existing structured count loops
+        for comment, analysis_result in zip(data["comments"], batch_results):
+            comment["sentiment"] = analysis_result
+            if analysis_result["label"] == "positive":
+                pos_count += 1
+            elif analysis_result["label"] == "negative":
+                neg_count += 1
+            elif analysis_result["label"] == "neutral":
+                neu_count += 1
+                
     data["pos_count"] = pos_count
     data["neg_count"] = neg_count
     data["neu_count"] = neu_count
@@ -210,9 +217,14 @@ Post contents below:
 {text}
 
 Comments on post:
-{"\n".join(f"- {comment["body"]}" for comment in data["comments"])}
+{"\n".join(f"- {comment['body']}" for comment in data["comments"])}
             """
-    ollama_response = chat(model=ANALYZER_MODEL, messages=[{"role": "user", "content": f"{PROMPT}"}])
+    
+    ollama_response = chat(
+        model=ANALYZER_MODEL, 
+        messages=[{"role": "user", "content": f"{PROMPT}"}],
+        options={"num_ctx": 16384}
+    )
 
     # save the data
     print(f'>> Saving data out to "{os.path.join(OUT_DIRECTORY, submission_id, f"{FILE_NAME}.json")}"')
