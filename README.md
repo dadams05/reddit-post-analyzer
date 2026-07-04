@@ -59,7 +59,7 @@ Depending on your available VRAM and hardware setups, consider swapping to these
 Clone this repository and move directly into the project directory:
 
 ```bash
-git clone https://github.com/dadams05/reddit-comment-scraper.git
+git clone https://github.com/dadams05/reddit-post-analyzer.git
 cd reddit-comment-scraper
 ```
 
